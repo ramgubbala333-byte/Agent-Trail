@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentTrail — Auditor</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --text:#e6edf3; --dim:#8b949e;
+          --ok:#3fb950; --bad:#f85149; --warn:#d29922; --accent:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+         background:var(--bg); color:var(--text); }
+  header { padding:16px 20px; border-bottom:1px solid var(--line); display:flex;
+           gap:16px; align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  header .sub { color:var(--dim); }
+  .stats { display:flex; gap:10px; flex-wrap:wrap; padding:14px 20px 0; }
+  .stat { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+          padding:8px 14px; min-width:110px; }
+  .stat b { display:block; font-size:18px; }
+  .stat span { color:var(--dim); font-size:12px; }
+  main { display:grid; grid-template-columns:300px 1fr; gap:16px; padding:16px 20px; }
+  @media (max-width: 800px) { main { grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; }
+  .panel h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em;
+              color:var(--dim); margin:0; padding:12px 14px; border-bottom:1px solid var(--line); }
+  .session { padding:10px 14px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .session:hover, .session.active { background:#1c2330; }
+  .session code { color:var(--accent); }
+  .session .meta { color:var(--dim); font-size:12px; }
+  .toolbar { display:flex; gap:8px; padding:12px 14px; border-bottom:1px solid var(--line);
+             align-items:center; flex-wrap:wrap; }
+  button, .btn { background:#21262d; color:var(--text); border:1px solid var(--line);
+                 border-radius:6px; padding:6px 12px; cursor:pointer; text-decoration:none;
+                 font-size:13px; }
+  button:hover, .btn:hover { border-color:var(--accent); }
+  .badge { border-radius:10px; padding:1px 9px; font-size:12px; border:1px solid var(--line); }
+  .ok { color:var(--ok); border-color:var(--ok); }
+  .bad { color:var(--bad); border-color:var(--bad); }
+  .warn { color:var(--warn); border-color:var(--warn); }
+  .event { padding:9px 14px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .event:hover { background:#1c2330; }
+  .event .row { display:flex; gap:10px; align-items:baseline; }
+  .event .seq { color:var(--dim); width:34px; flex:none; }
+  .event .type { font-weight:600; }
+  .event .detail { color:var(--dim); font-size:12.5px; }
+  .event pre { display:none; background:#0d1117; border:1px solid var(--line);
+               border-radius:6px; padding:10px; overflow:auto; font-size:12px; }
+  .event.open pre { display:block; }
+  .bar { height:5px; background:#21262d; border-radius:3px; margin-top:5px; }
+  .bar i { display:block; height:100%; background:var(--accent); border-radius:3px; }
+  .empty { padding:18px 14px; color:var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🛡 AgentTrail Auditor</h1>
+  <span class="sub">Tamper-evident audit trails — replay, verify, export. Reading this trail is itself audited.</span>
+</header>
+<div class="stats" id="stats"></div>
+<main>
+  <section class="panel">
+    <h2>Sessions</h2>
+    <div id="sessions"><div class="empty">Loading…</div></div>
+  </section>
+  <section class="panel">
+    <div class="toolbar">
+      <strong id="current">No session selected</strong>
+      <span id="sealBadge"></span>
+      <span style="flex:1"></span>
+      <button id="verifyBtn" disabled>Verify chain</button>
+      <a class="btn" id="exportBtn" href="#" style="pointer-events:none;opacity:.5">Evidence bundle (.zip)</a>
+    </div>
+    <div id="verifyOut"></div>
+    <div id="timeline"><div class="empty">Pick a session to replay its trail.</div></div>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+let current = null;
+
+async function loadStats() {
+  const s = await (await fetch('/audit/stats')).json();
+  const v = s.policy_verdicts || {};
+  $('#stats').innerHTML = [
+    ['Sessions', s.sessions], ['Events', s.events],
+    ['Total cost', '$' + (s.total_cost_usd ?? 0)],
+    ['Tokens', s.total_tokens ?? 0],
+    ['Allowed', v.allow ?? 0], ['Denied', v.deny ?? 0],
+    ['Approvals required', v.require_approval ?? 0],
+    ['Tool errors', s.tool_errors ?? 0],
+    ['Tool p95', (s.tool_latency_ms?.p95 ?? '—') + ' ms'],
+  ].map(([k, val]) => `<div class="stat"><b>${val}</b><span>${k}</span></div>`).join('');
+}
+
+async function loadSessions() {
+  const data = await (await fetch('/audit/sessions')).json();
+  const box = $('#sessions');
+  if (!data.sessions.length) { box.innerHTML = '<div class="empty">No sessions yet — run scripts/demo.sh.</div>'; return; }
+  box.innerHTML = '';
+  for (const s of data.sessions) {
+    const d = document.createElement('div');
+    d.className = 'session' + (s.session_id === current ? ' active' : '');
+    d.innerHTML = `<code>${s.session_id}</code><div class="meta">${s.last_sequence + 1} events · head ${s.last_hash.slice(7, 19)}…</div>`;
+    d.onclick = () => select(s.session_id);
+    box.appendChild(d);
+  }
+}
+
+function detailOf(e) {
+  const parts = [];
+  if (e.tool) parts.push(e.tool.tool_name + (e.tool.action_id ? ` · ${e.tool.action_id} v${e.tool.action_version}` : ''));
+  if (e.policy) parts.push(`policy: ${e.policy.verdict} (${e.policy.reason_code})`);
+  if (e.approval?.approver) parts.push(`approver: ${e.approval.approver}`);
+  if (e.outcome) parts.push(`outcome: ${e.outcome.status}` + (e.outcome.downstream_receipt ? ` · receipt ${e.outcome.downstream_receipt}` : ''));
+  if (e.decision_summary) parts.push(e.decision_summary);
+  return parts.join(' — ');
+}
+
+async function select(sid) {
+  current = sid;
+  $('#current').textContent = sid;
+  $('#verifyBtn').disabled = false;
+  const ex = $('#exportBtn');
+  ex.href = `/audit/sessions/${sid}/export.zip`; ex.style.pointerEvents = 'auto'; ex.style.opacity = '1';
+  $('#verifyOut').innerHTML = '';
+  await loadSessions();
+  const data = await (await fetch(`/audit/sessions/${sid}`)).json();
+  const events = data.events;
+  const maxDur = Math.max(1, ...events.map(e => e.outcome?.duration_ms || 0));
+  $('#timeline').innerHTML = '';
+  for (const e of events) {
+    const d = document.createElement('div');
+    d.className = 'event';
+    const bar = e.outcome?.duration_ms != null
+      ? `<div class="bar"><i style="width:${Math.max(2, 100 * e.outcome.duration_ms / maxDur)}%"></i></div>` : '';
+    d.innerHTML = `<div class="row"><span class="seq">#${e.sequence_no}</span>
+      <span class="type">${e.event_type}</span><span class="detail">${e.event_time_utc}</span></div>
+      <div class="detail">${detailOf(e)}</div>${bar}
+      <pre>${JSON.stringify(e, null, 2)}</pre>`;
+    d.onclick = () => d.classList.toggle('open');
+    $('#timeline').appendChild(d);
+  }
+  refreshSeal(sid);
+}
+
+async function refreshSeal(sid) {
+  const r = await (await fetch(`/audit/sessions/${sid}/verify`)).json();
+  const seal = r.seal || { status: 'open' };
+  $('#sealBadge').innerHTML = r.valid
+    ? `<span class="badge ok">chain valid · ${r.events_checked} events</span>
+       <span class="badge ${seal.status === 'sealed' ? 'ok' : 'warn'}">${seal.status === 'sealed' ? '🔒 sealed' : 'OPEN (unsealed)'}</span>`
+    : `<span class="badge bad">CHAIN BROKEN at #${r.failed_at_sequence}</span>`;
+}
+
+$('#verifyBtn').onclick = async () => {
+  if (!current) return;
+  const r = await (await fetch(`/audit/sessions/${current}/verify`)).json();
+  $('#verifyOut').innerHTML = `<div style="padding:10px 14px" class="${r.valid ? '' : ''}">
+    ${r.valid ? '✅' : '❌'} <b>${r.valid ? 'Chain valid' : 'INVALID — ' + r.reason}</b>
+    · ${r.events_checked} events checked · seal: ${(r.seal || {}).status || 'n/a'}</div>`;
+  refreshSeal(current);
+};
+
+loadStats(); loadSessions();
+</script>
+</body>
+</html>
